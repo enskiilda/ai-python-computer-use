@@ -1,10 +1,8 @@
 "use client";
 
 import { PreviewMessage } from "@/components/message";
-import { getDesktopURL } from "@/lib/e2b/utils";
 import { useScrollToBottom } from "@/lib/use-scroll-to-bottom";
-import { useChat } from "@ai-sdk/react";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { Input } from "@/components/input";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
@@ -16,7 +14,20 @@ import {
   ResizablePanel,
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
-import { ABORTED } from "@/lib/utils";
+import type { Message } from "ai";
+
+// Backend URL - hardcoded for unsafe mode
+const BACKEND_URL = "http://localhost:8000";
+
+// Message types for the chat
+interface ChatMessage extends Message {
+  toolCalls?: Array<{
+    toolName: string;
+    arguments: Record<string, unknown>;
+    status: "executing" | "completed";
+    result?: Record<string, unknown>;
+  }>;
+}
 
 export default function Chat() {
   // Create separate refs for mobile and desktop to ensure both scroll properly
@@ -25,90 +36,302 @@ export default function Chat() {
 
   const [isInitializing, setIsInitializing] = useState(true);
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
-  const [sandboxId, setSandboxId] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [input, setInput] = useState("");
+  const [status, setStatus] = useState<"ready" | "streaming" | "submitted" | "error">("ready");
+  const wsRef = useRef<WebSocket | null>(null);
+  const currentMessageRef = useRef<string>("");
 
-  const {
-    messages,
-    input,
-    handleInputChange,
-    handleSubmit,
-    status,
-    stop: stopGeneration,
-    append,
-    setMessages,
-  } = useChat({
-    api: "/api/chat",
-    id: sandboxId ?? undefined,
-    body: {
-      sandboxId,
-    },
-    maxSteps: 30,
-    onError: (error) => {
-      console.error(error);
-      toast.error("There was an error", {
-        description: "Please try again later.",
-        richColors: true,
-        position: "top-center",
-      });
-    },
-  });
-
-  const stop = () => {
-    stopGeneration();
-
-    const lastMessage = messages.at(-1);
-    const lastMessageLastPart = lastMessage?.parts.at(-1);
-    if (
-      lastMessage?.role === "assistant" &&
-      lastMessageLastPart?.type === "tool-invocation"
-    ) {
-      setMessages((prev) => [
-        ...prev.slice(0, -1),
-        {
-          ...lastMessage,
-          parts: [
-            ...lastMessage.parts.slice(0, -1),
-            {
-              ...lastMessageLastPart,
-              toolInvocation: {
-                ...lastMessageLastPart.toolInvocation,
-                state: "result",
-                result: ABORTED,
-              },
-            },
-          ],
-        },
-      ]);
-    }
+  const handleInputChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    setInput(event.target.value);
   };
+
+  // Create session and WebSocket connection
+  const initSession = useCallback(async () => {
+    try {
+      setIsInitializing(true);
+      
+      // Create new browser session via Python backend
+      const response = await fetch(`${BACKEND_URL}/api/session/create`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
+      
+      if (!response.ok) {
+        throw new Error(`Failed to create session: ${response.statusText}`);
+      }
+      
+      const data = await response.json();
+      setSessionId(data.session_id);
+      setStreamUrl(data.stream_url);
+      
+      return data.session_id;
+    } catch (error) {
+      console.error("Failed to initialize session:", error);
+      toast.error("Failed to initialize browser session");
+      return null;
+    } finally {
+      setIsInitializing(false);
+    }
+  }, []);
+
+  // Connect WebSocket
+  const connectWebSocket = useCallback((sid: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      return;
+    }
+    
+    const ws = new WebSocket(`ws://localhost:8000/ws/chat/${sid}`);
+    
+    ws.onopen = () => {
+      console.log("WebSocket connected");
+    };
+    
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      
+      switch (data.type) {
+        case "text":
+          // Streaming text from AI
+          currentMessageRef.current += data.content;
+          setMessages((prev) => {
+            const lastMsg = prev[prev.length - 1];
+            if (lastMsg?.role === "assistant" && !lastMsg.toolCalls?.length) {
+              return [
+                ...prev.slice(0, -1),
+                {
+                  ...lastMsg,
+                  content: currentMessageRef.current,
+                  parts: [{ type: "text" as const, text: currentMessageRef.current }],
+                },
+              ];
+            } else {
+              return [
+                ...prev,
+                {
+                  id: `msg-${Date.now()}`,
+                  role: "assistant" as const,
+                  content: currentMessageRef.current,
+                  parts: [{ type: "text" as const, text: currentMessageRef.current }],
+                },
+              ];
+            }
+          });
+          break;
+        
+        case "tool_call":
+          // AI is calling a tool
+          currentMessageRef.current = "";
+          setMessages((prev) => {
+            const toolInvocation = {
+              toolCallId: `tool-${Date.now()}`,
+              toolName: data.tool_name,
+              args: data.arguments,
+              state: "call" as const,
+            };
+            
+            const lastMsg = prev[prev.length - 1];
+            if (lastMsg?.role === "assistant") {
+              return [
+                ...prev.slice(0, -1),
+                {
+                  ...lastMsg,
+                  parts: [
+                    ...(lastMsg.parts || []),
+                    { type: "tool-invocation" as const, toolInvocation },
+                  ],
+                },
+              ];
+            } else {
+              return [
+                ...prev,
+                {
+                  id: `msg-${Date.now()}`,
+                  role: "assistant" as const,
+                  content: "",
+                  parts: [{ type: "tool-invocation" as const, toolInvocation }],
+                },
+              ];
+            }
+          });
+          break;
+        
+        case "tool_result":
+          // Tool execution completed
+          setMessages((prev) => {
+            const lastMsg = prev[prev.length - 1];
+            if (lastMsg?.role === "assistant" && lastMsg.parts) {
+              const updatedParts = lastMsg.parts.map((part) => {
+                if (
+                  part.type === "tool-invocation" &&
+                  part.toolInvocation.toolName === data.tool_name &&
+                  part.toolInvocation.state === "call"
+                ) {
+                  return {
+                    ...part,
+                    toolInvocation: {
+                      ...part.toolInvocation,
+                      state: "result" as const,
+                      result: data.result,
+                    },
+                  };
+                }
+                return part;
+              });
+              
+              return [
+                ...prev.slice(0, -1),
+                { ...lastMsg, parts: updatedParts },
+              ];
+            }
+            return prev;
+          });
+          break;
+        
+        case "task_complete":
+          setStatus("ready");
+          toast.success("Task completed!", {
+            description: data.summary,
+            position: "top-center",
+          });
+          break;
+        
+        case "status":
+          console.log("Status:", data.message);
+          break;
+        
+        case "warning":
+          toast.warning(data.message, { position: "top-center" });
+          setStatus("ready");
+          break;
+        
+        case "error":
+          toast.error(data.message, { position: "top-center" });
+          setStatus("error");
+          break;
+      }
+    };
+    
+    ws.onerror = (error) => {
+      console.error("WebSocket error:", error);
+      toast.error("Connection error");
+      setStatus("error");
+    };
+    
+    ws.onclose = () => {
+      console.log("WebSocket closed");
+    };
+    
+    wsRef.current = ws;
+  }, []);
+
+  // Submit message
+  const handleSubmit = useCallback((e?: React.FormEvent) => {
+    e?.preventDefault();
+    
+    if (!input.trim() || !sessionId || status !== "ready") return;
+    
+    // Add user message
+    const userMessage: ChatMessage = {
+      id: `user-${Date.now()}`,
+      role: "user",
+      content: input,
+      parts: [{ type: "text", text: input }],
+    };
+    
+    setMessages((prev) => [...prev, userMessage]);
+    currentMessageRef.current = "";
+    setStatus("streaming");
+    
+    // Send via WebSocket
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: "message",
+        content: input,
+      }));
+    } else {
+      // Reconnect and send
+      connectWebSocket(sessionId);
+      setTimeout(() => {
+        wsRef.current?.send(JSON.stringify({
+          type: "message",
+          content: input,
+        }));
+      }, 500);
+    }
+    
+    setInput("");
+  }, [input, sessionId, status, connectWebSocket]);
+
+  // Stop generation
+  const stop = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "stop" }));
+    }
+    setStatus("ready");
+  }, []);
+
+  // Append message (for suggestions)
+  const append = useCallback((message: { role: string; content: string }) => {
+    setInput(message.content);
+    setTimeout(() => {
+      const fakeEvent = { preventDefault: () => {} } as React.FormEvent;
+      handleSubmit(fakeEvent);
+    }, 100);
+  }, [handleSubmit]);
 
   const isLoading = status !== "ready";
 
+  // Refresh desktop connection
   const refreshDesktop = async () => {
     try {
-      setIsInitializing(true);
-      const { streamUrl, id } = await getDesktopURL(sandboxId || undefined);
-      // console.log("Refreshed desktop connection with ID:", id);
-      setStreamUrl(streamUrl);
-      setSandboxId(id);
+      // Close existing WebSocket
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+      
+      // Kill existing session
+      if (sessionId) {
+        try {
+          await fetch(`${BACKEND_URL}/api/session/${sessionId}`, {
+            method: "DELETE",
+          });
+        } catch (e) {
+          console.error("Failed to kill old session:", e);
+        }
+      }
+      
+      // Create new session
+      const newSessionId = await initSession();
+      if (newSessionId) {
+        connectWebSocket(newSessionId);
+        setMessages([]);
+      }
     } catch (err) {
       console.error("Failed to refresh desktop:", err);
-    } finally {
-      setIsInitializing(false);
+      toast.error("Failed to refresh desktop");
     }
   };
 
   // Kill desktop on page close
   useEffect(() => {
-    if (!sandboxId) return;
+    if (!sessionId) return;
 
-    // Function to kill the desktop - just one method to reduce duplicates
     const killDesktop = () => {
-      if (!sandboxId) return;
-
-      // Use sendBeacon which is best supported across browsers
+      if (!sessionId) return;
+      
+      // Close WebSocket
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
+      
+      // Use sendBeacon for cleanup
       navigator.sendBeacon(
-        `/api/kill-desktop?sandboxId=${encodeURIComponent(sandboxId)}`,
+        `${BACKEND_URL}/api/session/${encodeURIComponent(sessionId)}`,
       );
     };
 
@@ -118,48 +341,37 @@ export default function Chat() {
       (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
     const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
 
-    // Choose exactly ONE event handler based on the browser
     if (isIOS || isSafari) {
-      // For Safari on iOS, use pagehide which is most reliable
       window.addEventListener("pagehide", killDesktop);
-
       return () => {
         window.removeEventListener("pagehide", killDesktop);
-        // Also kill desktop when component unmounts
         killDesktop();
       };
     } else {
-      // For all other browsers, use beforeunload
       window.addEventListener("beforeunload", killDesktop);
-
       return () => {
         window.removeEventListener("beforeunload", killDesktop);
-        // Also kill desktop when component unmounts
         killDesktop();
       };
     }
-  }, [sandboxId]);
+  }, [sessionId]);
 
+  // Initialize on mount
   useEffect(() => {
-    // Initialize desktop and get stream URL when the component mounts
     const init = async () => {
-      try {
-        setIsInitializing(true);
-
-        // Use the provided ID or create a new one
-        const { streamUrl, id } = await getDesktopURL(sandboxId ?? undefined);
-
-        setStreamUrl(streamUrl);
-        setSandboxId(id);
-      } catch (err) {
-        console.error("Failed to initialize desktop:", err);
-        toast.error("Failed to initialize desktop");
-      } finally {
-        setIsInitializing(false);
+      const sid = await initSession();
+      if (sid) {
+        connectWebSocket(sid);
       }
     };
-
+    
     init();
+    
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
