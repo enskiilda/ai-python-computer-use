@@ -19,7 +19,23 @@ import {
   MousePointerClick,
   ScrollText,
   StopCircle,
+  Move,
+  GripHorizontal,
+  CheckSquare,
 } from "lucide-react";
+
+// Computer tool names from Kernel SDK
+const KERNEL_COMPUTER_TOOLS = [
+  "click_mouse",
+  "move_mouse", 
+  "capture_screenshot",
+  "type_text",
+  "press_key",
+  "scroll",
+  "drag_mouse",
+  "wait",
+  "task_complete"
+] as const;
 
 const PurePreviewMessage = ({
   message,
@@ -46,14 +62,6 @@ const PurePreviewMessage = ({
             "group-data-[role=user]/message:w-fit",
           )}
         >
-          {/* {message.role === "assistant" && (
-            <div className="size-8 flex items-center rounded-full justify-center ring-1 shrink-0 ring-border bg-background">
-              <div className="translate-y-px">
-                <SparklesIcon size={14} />
-              </div>
-            </div>
-          )} */}
-
           <div className="flex flex-col w-full">
             {message.parts?.map((part, i) => {
               switch (part.type) {
@@ -79,30 +87,38 @@ const PurePreviewMessage = ({
                   const { toolName, toolCallId, state, args } =
                     part.toolInvocation;
 
-                  if (toolName === "computer") {
-                    const {
-                      action,
-                      coordinate,
-                      text,
-                      duration,
-                      scroll_amount,
-                      scroll_direction,
-                    } = args;
+                  // Handle computer tool actions (both old anthropic style and new kernel style)
+                  const isComputerTool = toolName === "computer" || 
+                    KERNEL_COMPUTER_TOOLS.includes(toolName as typeof KERNEL_COMPUTER_TOOLS[number]);
+                  
+                  if (isComputerTool) {
+                    // Support both old action-based args and new direct tool names
+                    const action = args.action || toolName;
+                    const coordinate = args.coordinate || (args.x !== undefined && args.y !== undefined ? [args.x, args.y] : null);
+                    const text = args.text;
+                    const duration = args.duration || args.seconds;
+                    const scroll_amount = args.scroll_amount || Math.abs(args.delta_y || 0);
+                    const scroll_direction = args.scroll_direction || (args.delta_y > 0 ? "down" : args.delta_y < 0 ? "up" : null);
+                    const keys = args.keys;
+                    const summary = args.summary;
+                    
                     let actionLabel = "";
                     let actionDetail = "";
                     let ActionIcon = null;
 
                     switch (action) {
                       case "screenshot":
+                      case "capture_screenshot":
                         actionLabel = "Taking screenshot";
                         ActionIcon = Camera;
                         break;
                       case "left_click":
-                        actionLabel = "Left clicking";
+                      case "click_mouse":
+                        actionLabel = args.button === "right" ? "Right clicking" : args.num_clicks === 2 ? "Double clicking" : "Clicking";
                         actionDetail = coordinate
                           ? `at (${coordinate[0]}, ${coordinate[1]})`
                           : "";
-                        ActionIcon = MousePointer;
+                        ActionIcon = MousePointerClick;
                         break;
                       case "right_click":
                         actionLabel = "Right clicking";
@@ -119,20 +135,23 @@ const PurePreviewMessage = ({
                         ActionIcon = MousePointerClick;
                         break;
                       case "mouse_move":
+                      case "move_mouse":
                         actionLabel = "Moving mouse";
                         actionDetail = coordinate
                           ? `to (${coordinate[0]}, ${coordinate[1]})`
                           : "";
-                        ActionIcon = MousePointer;
+                        ActionIcon = Move;
                         break;
                       case "type":
+                      case "type_text":
                         actionLabel = "Typing";
-                        actionDetail = text ? `"${text}"` : "";
+                        actionDetail = text ? `"${text.slice(0, 30)}${text.length > 30 ? '...' : ''}"` : "";
                         ActionIcon = Keyboard;
                         break;
                       case "key":
+                      case "press_key":
                         actionLabel = "Pressing key";
-                        actionDetail = text ? `"${text}"` : "";
+                        actionDetail = keys ? `"${keys.join(', ')}"` : text ? `"${text}"` : "";
                         ActionIcon = KeyRound;
                         break;
                       case "wait":
@@ -147,6 +166,17 @@ const PurePreviewMessage = ({
                             ? `${scroll_direction} by ${scroll_amount}`
                             : "";
                         ActionIcon = ScrollText;
+                        break;
+                      case "drag_mouse":
+                      case "left_click_drag":
+                        actionLabel = "Dragging";
+                        actionDetail = args.path ? `along ${args.path.length} points` : "";
+                        ActionIcon = GripHorizontal;
+                        break;
+                      case "task_complete":
+                        actionLabel = "Task completed";
+                        actionDetail = summary ? summary.slice(0, 50) : "";
+                        ActionIcon = CheckSquare;
                         break;
                       default:
                         actionLabel = action;
@@ -197,7 +227,7 @@ const PurePreviewMessage = ({
                           </div>
                         </div>
                         {state === "result" ? (
-                          part.toolInvocation.result.type === "image" && (
+                          (part.toolInvocation.result?.type === "image" || part.toolInvocation.result?.data) && (
                             <div className="p-2">
                               {/* eslint-disable-next-line @next/next/no-img-element */}
                               <img
@@ -207,7 +237,7 @@ const PurePreviewMessage = ({
                               />
                             </div>
                           )
-                        ) : action === "screenshot" ? (
+                        ) : (action === "screenshot" || action === "capture_screenshot") ? (
                           <div className="w-full aspect-[1024/768] rounded-sm bg-zinc-200 dark:bg-zinc-800 animate-pulse"></div>
                         ) : null}
                       </motion.div>

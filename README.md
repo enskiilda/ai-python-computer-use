@@ -1,83 +1,103 @@
-<a href="https://ai-sdk-starter-groq.vercel.app">
-  <h1 align="center">AI SDK Computer Use Demo</h1>
-</a>
+# AI Computer Use with Kernel SDK and NVIDIA Llama 4
 
-<p align="center">
-  An open-source AI chatbot app template demonstrating Anthropic Claude 3.7 Sonnet's computer use capabilities, built with Next.js and the AI SDK by Vercel.
-</p>
+A real-time AI agent that controls a browser using computer tools. Built with:
 
-<p align="center">
-  <a href="#features"><strong>Features</strong></a> ·
-  <a href="#deploy-your-own"><strong>Deploy Your Own</strong></a> ·
-  <a href="#running-locally"><strong>Running Locally</strong></a> ·
-  <a href="#authors"><strong>Authors</strong></a>
-</p>
-<br/>
+- **Kernel SDK** - Browser control (mouse, keyboard, screenshots)
+- **NVIDIA Llama 4** - AI model for decision making
+- **WebSocket** - Real-time bidirectional communication (not SSE)
+- **Next.js** - Frontend UI
+- **Python FastAPI** - Backend server
+
+## Architecture
+
+```
+┌─────────────┐    WebSocket    ┌──────────────────┐    HTTP    ┌────────────┐
+│   Next.js   │ ◄─────────────► │  Python Backend  │ ◄────────► │ Kernel SDK │
+│   Frontend  │                 │  (FastAPI)       │            │  Browser   │
+└─────────────┘                 │                  │            └────────────┘
+                                │  NVIDIA Llama 4  │
+                                │  Function Calling│
+                                └──────────────────┘
+```
 
 ## Features
 
-- Streaming text responses powered by the [AI SDK by Vercel](https://sdk.vercel.ai/docs), allowing multiple AI providers to be used interchangeably with just a few lines of code.
-- Integration with Anthropic Claude 3.7 Sonnet's computer use tool and bash tool capabilities.
-- Sandbox environment with [e2b](https://e2b.dev) for secure execution.
-- [shadcn/ui](https://ui.shadcn.com/) components for a modern, responsive UI powered by [Tailwind CSS](https://tailwindcss.com).
-- Built with the latest [Next.js](https://nextjs.org) App Router.
+- **Real-time streaming** - AI actions and messages stream live via WebSocket
+- **Infinite loop execution** - AI continues executing until task is complete
+- **Computer tools** - Click, type, scroll, screenshot, press keys, drag
+- **Task completion** - AI signals when task is done with summary
+- **Live action updates** - AI reports what it's doing in real-time
 
-## Deploy Your Own
+## Getting Started
 
-You can deploy your own version to Vercel by clicking the button below:
+### 1. Start the Python Backend
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?project-name=AI+SDK+Computer+Use+Demo&repository-name=ai-sdk-computer-use&repository-url=https%3A%2F%2Fgithub.com%2Fvercel-labs%2Fai-sdk-computer-use&demo-title=AI+SDK+Computer+Use+Demo&demo-url=https%3A%2F%2Fai-sdk-computer-use.vercel.app%2F&demo-description=A+chatbot+application+built+with+Next.js+demonstrating+Anthropic+Claude+3.7+Sonnet%27s+computer+use+capabilities&env=ANTHROPIC_API_KEY,E2B_API_KEY)
+```bash
+cd backend
+pip install -r requirements.txt
+python main.py
+```
 
-## Running Locally
+The backend runs on `http://localhost:8000`
 
-1. Clone the repository and install dependencies:
+### 2. Start the Frontend
 
-   ```bash
-   npm install
-   # or
-   yarn install
-   # or
-   pnpm install
-   ```
+```bash
+pnpm install
+pnpm dev
+```
 
-2. Install the [Vercel CLI](https://vercel.com/docs/cli):
+The frontend runs on `http://localhost:3000`
 
-   ```bash
-   npm i -g vercel
-   # or
-   yarn global add vercel
-   # or
-   pnpm install -g vercel
-   ```
+## API Keys (Hardcoded in backend/main.py)
 
-   Once installed, link your local project to your Vercel project:
+The following API keys are hardcoded in the backend:
 
-   ```bash
-   vercel link
-   ```
+- **NVIDIA_API_KEY** - For Llama 4 API
+- **KERNEL_API_KEY** - For Kernel SDK browser control
 
-   After linking, pull your environment variables:
+## Computer Tools
 
-   ```bash
-   vercel env pull
-   ```
+The AI has access to these tools for controlling the browser:
 
-   This will create a `.env.local` file with all the necessary environment variables.
+| Tool | Description |
+|------|-------------|
+| `click_mouse` | Click at coordinates (x, y) |
+| `move_mouse` | Move cursor to position |
+| `capture_screenshot` | Take screenshot of browser |
+| `type_text` | Type text into focused element |
+| `press_key` | Press keyboard keys (Enter, Tab, Ctrl+C, etc.) |
+| `scroll` | Scroll page at position |
+| `drag_mouse` | Drag along a path of points |
+| `wait` | Wait for specified duration |
+| `task_complete` | Signal task completion with summary |
 
-3. Run the development server:
+## WebSocket Protocol
 
-   ```bash
-   npm run dev
-   # or
-   yarn dev
-   # or
-   pnpm dev
-   ```
+### Messages from Backend to Frontend
 
-4. Open [http://localhost:3000](http://localhost:3000) to view your new AI chatbot application.
+```typescript
+{ type: "text", content: string }        // AI text response (streaming)
+{ type: "tool_call", tool_name: string, arguments: object, status: "executing" }
+{ type: "tool_result", tool_name: string, result: object }
+{ type: "task_complete", summary: string }
+{ type: "status", message: string }
+{ type: "warning", message: string }
+{ type: "error", message: string }
+```
 
-## Authors
+### Messages from Frontend to Backend
 
-This repository is maintained by the [Vercel](https://vercel.com) team and community contributors.
+```typescript
+{ type: "message", content: string }     // User message
+{ type: "stop" }                         // Stop execution
+```
 
-Contributions are welcome! Feel free to open issues or submit pull requests to enhance functionality or fix bugs.
+## How It Works
+
+1. User sends a task via the chat interface
+2. AI takes a screenshot to see the current state
+3. AI decides on an action and executes it via Kernel SDK
+4. AI continues in a loop, taking screenshots and executing actions
+5. When the task is complete, AI calls `task_complete` to signal success
+6. All actions are streamed in real-time to the frontend
