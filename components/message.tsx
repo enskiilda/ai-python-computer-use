@@ -24,6 +24,19 @@ import {
   CheckSquare,
 } from "lucide-react";
 
+// Computer tool names from Kernel SDK
+const KERNEL_COMPUTER_TOOLS = [
+  "click_mouse",
+  "move_mouse", 
+  "capture_screenshot",
+  "type_text",
+  "press_key",
+  "scroll",
+  "drag_mouse",
+  "wait",
+  "task_complete"
+] as const;
+
 const PurePreviewMessage = ({
   message,
   isLatestMessage,
@@ -76,7 +89,7 @@ const PurePreviewMessage = ({
 
                   // Handle computer tool actions (both old anthropic style and new kernel style)
                   const isComputerTool = toolName === "computer" || 
-                    ["click_mouse", "move_mouse", "capture_screenshot", "type_text", "press_key", "scroll", "drag_mouse", "wait", "task_complete"].includes(toolName);
+                    KERNEL_COMPUTER_TOOLS.includes(toolName as typeof KERNEL_COMPUTER_TOOLS[number]);
                   
                   if (isComputerTool) {
                     // Support both old action-based args and new direct tool names
